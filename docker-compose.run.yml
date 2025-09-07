@@ -1,0 +1,62 @@
+services:
+  pipeline-config:
+    build:
+      context: .
+      dockerfile: containers/go-config.Dockerfile
+    image: pipeline-config
+    ports:
+      - "8060:8060"
+    volumes:
+      - ./metrics/config.yaml:/config.yaml
+
+  load-generator:
+    build:
+      context: .
+      dockerfile: containers/load-generator.Dockerfile
+    image: load-generator
+    environment:
+      - KAFKA_ENDPOINT=kafka:9092
+      - INPUT_TOPIC=input-topic
+    depends_on:
+      - kafka
+
+  latency-monitor:
+    build:
+      context: .
+      dockerfile: containers/latency-monitor.Dockerfile
+    image: latency-monitor
+    ports:
+      - "8081:8081"
+    environment:
+      - KAFKA_ENDPOINT=kafka:9092
+      - INPUT_TOPIC=input-topic
+    depends_on:
+      - kafka
+
+  go-server:
+    build:
+      context: .
+      dockerfile: containers/go-server.Dockerfile
+    image: go-server
+    ports:
+      - "5050:5050"
+    depends_on:
+      - pipeline-config
+
+  java-pipeline:
+    build:
+      context: .
+      dockerfile: containers/webservice-pipeline.Dockerfile
+    image: java-pipeline
+    ports:
+      - "8082:8082"
+    environment:
+      - KAFKA_ENDPOINT=kafka:9092
+      - INPUT_TOPIC=input-topic
+      - OUTPUT_TOPIC=output-topic
+      - ENDPOINT_BASE_PATH=http://go-server:5050
+    depends_on:
+      - load-generator
+      - go-server
+      - latency-monitor
+      - pipeline-config

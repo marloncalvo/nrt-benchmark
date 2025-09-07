@@ -1,0 +1,10 @@
+services:
+  devcontainer:
+    image: mcr.microsoft.com/vscode/devcontainers/base:debian
+    volumes:
+      - ..:/workspace:cached
+    command: sleep infinity
+    init: true
+    user: vscode
+
+

@@ -1,0 +1,40 @@
+{
+  "name": "pipeline-perf (JDK 24 + Node + Kafka)",
+  "dockerComposeFile": [
+    "../docker-compose.yml",
+    "docker-compose.yml"
+  ],
+  "postStartCommand": "scripts/postCommands.sh",
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+  "features": {
+    "ghcr.io/devcontainers/features/java:1": {
+      "version": "24"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    },
+    "ghcr.io/devcontainers/features/python": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/go": {
+      "version": "latest"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "vscjava.vscode-java-pack",
+        "redhat.java",
+        "vscjava.vscode-gradle",
+        "vscjava.vscode-maven",
+        "esbenp.prettier-vscode",
+        "dbaeumer.vscode-eslint",
+        "jeppeandersen.vscode-kafka",
+        "ms-python.python"
+      ],
+      "settings": {
+      }
+    }
+  }
+}
