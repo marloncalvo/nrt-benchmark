@@ -9,18 +9,11 @@ import io.prometheus.metrics.instrumentation.jvm.JvmMetrics;
 import io.prometheus.metrics.model.snapshots.Unit;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.OpenContext;
-import org.apache.flink.api.common.typeinfo.Types;
-import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.api.java.tuple.Tuple3;
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.connector.base.DeliveryGuarantee;
-import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
 import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchemaBuilder;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
-import org.apache.flink.connector.kafka.source.reader.deserializer.KafkaRecordDeserializationSchema;
 import org.apache.flink.formats.json.JsonDeserializationSchema;
 import org.apache.flink.formats.json.JsonSerializationSchema;
 import org.apache.flink.streaming.api.datastream.AsyncDataStream;
@@ -28,8 +21,6 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.async.ResultFuture;
 import org.apache.flink.streaming.api.functions.async.RichAsyncFunction;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -115,11 +106,6 @@ public class FlinkWebServicePipeline implements Serializable {
         // Configure Flink environment (use cluster defaults for REST/UI)
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-        logger.info("Flink version:");
-
-        // Set parallelism from env (defaults to 1 if unset)
-        env.setParallelism(10);
-
         // Enable object reuse for better performance with JSON
         env.getConfig().enableObjectReuse();
 
@@ -147,7 +133,7 @@ public class FlinkWebServicePipeline implements Serializable {
                 source,
                 WatermarkStrategy.noWatermarks(),
                 "Kafka Source"
-        );
+        ).rebalance();
 
         // Process messages with async I/O for service calls
         DataStream<BrokerEvent> processedStream = AsyncDataStream
@@ -196,14 +182,9 @@ public class FlinkWebServicePipeline implements Serializable {
             long startTime = System.currentTimeMillis();
 
             // Create 4 concurrent service call futures
-            List<CompletableFuture<Void>> futures = new ArrayList<>();
+            List<CompletableFuture<?>> futures = new ArrayList<>();
             for (int i = 0; i < 4; i++) {
-                futures.add(CompletableFuture.runAsync(() -> {
-                    long callStart = System.currentTimeMillis();
-                    service.get();
-                    long callDuration = System.currentTimeMillis() - callStart;
-                    serviceCallTime.observe(callDuration / 1000.0);
-                }));
+                futures.add(service.getAsync());
             }
 
             // Wait for all service calls to complete

@@ -3,14 +3,15 @@ package com.marloncalvo.bench.pipelines;
 import com.marloncalvo.bench.common.BrokerEvent;
 import com.marloncalvo.bench.common.Service;
 import com.marloncalvo.bench.config.ConfigService;
+
 import io.prometheus.metrics.core.metrics.Counter;
 import io.prometheus.metrics.core.metrics.Histogram;
 import io.prometheus.metrics.exporter.httpserver.HTTPServer;
 import io.prometheus.metrics.instrumentation.jvm.JvmMetrics;
 import io.prometheus.metrics.model.snapshots.Unit;
-import org.apache.spark.api.java.function.MapFunction;
+
+import org.apache.spark.api.java.function.MapPartitionsFunction;
 import org.apache.spark.sql.*;
-import org.apache.spark.sql.functions;
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.streaming.StreamingQueryListener;
 import org.apache.spark.sql.streaming.StreamingQueryProgress;
@@ -20,6 +21,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.concurrent.CompletableFuture;
 
 public class SparkWebServicePipeline implements Serializable {
     private static final Logger logger = LoggerFactory.getLogger(SparkWebServicePipeline.class);
@@ -62,6 +65,7 @@ public class SparkWebServicePipeline implements Serializable {
     private final String outputTopic;
     private final String kafkaBootstrapServers;
     private final SparkSession spark;
+    private final Service executorService;
 
     public SparkWebServicePipeline() {
         this.inputTopic = System.getenv().getOrDefault("INPUT_TOPIC", "input-topic");
@@ -79,28 +83,28 @@ public class SparkWebServicePipeline implements Serializable {
 
         // Create Spark session
         this.spark = createOptimizedSparkSession();
+        this.executorService = new Service();
     }
 
     private SparkSession createOptimizedSparkSession() {
         return SparkSession.builder()
                 .appName("SparkWebServicePipeline")
                 .master(System.getenv().getOrDefault("SPARK_MASTER", "local[*]"))
-                
+
                 // Basic Spark streaming configuration
                 .config("spark.sql.streaming.metricsEnabled", "true")
                 .config("spark.sql.shuffle.partitions", "32") // Increased for better parallelism
-                
-                // Standard serialization for benchmarking
-                .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-                
+
+                // Use Java serialization to avoid Kryo version conflicts with Flink
+                // Comment: Java serialization is slower but avoids the Kryo/Chill compatibility issues
+                .config("spark.serializer", "org.apache.spark.serializer.JavaSerializer")
+
                 .getOrCreate();
     }
 
     public void run() {
-        ConfigService configService = new ConfigService();
-
         logger.info("Starting Spark Structured Streaming WebService Pipeline");
-        
+
         // Register metrics listener for batch monitoring
         spark.streams().addListener(new MetricsListener());
 
@@ -111,50 +115,49 @@ public class SparkWebServicePipeline implements Serializable {
                 .option("kafka.bootstrap.servers", kafkaBootstrapServers)
                 .option("subscribe", inputTopic)
                 .option("startingOffsets", "latest")
-                .option("maxOffsetsPerTrigger", "10000")
+                .option("maxOffsetsPerTrigger", "1000000000")
                 .option("failOnDataLoss", "false")
                 .load();
 
         // Parse Kafka messages
-        Dataset<Row> messages = kafkaStream
-                .selectExpr(
-                    "CAST(key AS STRING) as messageKey",
-                    "CAST(value AS STRING) as messageValue", 
-                    "timestamp",
-                    "offset",
-                    "partition")
-                .withColumn("tasks", functions.expr("array(1,2,3,4)")); // Create 4 tasks per message
-        
-        // Expand each message into 4 service call tasks using explode
-        Dataset<Row> serviceTasks = messages
-                .select(
-                    functions.col("messageKey"),
-                    functions.col("messageValue"),
-                    functions.col("timestamp"),
-                    functions.explode(functions.col("tasks")).as("taskId"))
-                .repartition(200); // Distribute tasks across 200 partitions for parallelism
-        
+        Dataset<Row> messages = kafkaStream.selectExpr("timestamp");
+
         // Execute service calls using map operation
-        Dataset<Row> serviceResults = serviceTasks
-                .map(new ServiceCallProcessor(), Encoders.bean(ServiceCallResult.class))
-                .toDF();
-        
-        // Group results back by original message
-        Dataset<Row> processedStream = serviceResults
-                .groupBy("messageKey", "timestamp")
-                .agg(
-                    functions.first("outputValue").as("value"),
-                    functions.avg("callDuration").as("processingTime"),
-                    functions.count("*").as("serviceCallCount"))
-                .select(
-                    functions.col("messageKey").as("key"),
-                    functions.col("value"));
+        Dataset<BrokerEvent> serviceResults = messages
+                .mapPartitions(
+                        (MapPartitionsFunction<Row, BrokerEvent>) (it) -> {
+                            var batchSize = ExecutorContext.getClient().getInstance().getBatchSize();
+                            ArrayList<CompletableFuture<?>> pending = new ArrayList<>();
+                            ArrayList<BrokerEvent> out = new ArrayList<>(pending.size());
+                            while (it.hasNext()) {
+                                for (int i = 0; i < batchSize && it.hasNext(); i++) {
+                                    Row row = it.next();
+                                    // Convert java.sql.Timestamp to long (milliseconds)
+                                    java.sql.Timestamp timestamp = row.getAs("timestamp");
+                                    out.add(new BrokerEvent(timestamp.getTime()));
+                                    pending.add(ExecutorContext.getExecutorService().getAsync().exceptionally(ex -> null));
+                                    pending.add(ExecutorContext.getExecutorService().getAsync().exceptionally(ex -> null));
+                                    pending.add(ExecutorContext.getExecutorService().getAsync().exceptionally(ex -> null));
+                                    pending.add(ExecutorContext.getExecutorService().getAsync().exceptionally(ex -> null));
+                                }
+
+                                if (!pending.isEmpty()) {
+                                    CompletableFuture.allOf(pending.toArray(new CompletableFuture[0])).join();
+                                }
+                            }
+                            return out.iterator();
+                        },
+                        Encoders.bean(BrokerEvent.class));
+
+        Dataset<Row> kafkaSinkMessage = serviceResults
+                .select(functions.to_json(functions.struct(serviceResults.col("*")))
+                        .cast("string")
+                        .alias("value"));
 
         // Write to output Kafka topic using native sink for optimal performance
         StreamingQuery query;
         try {
-            query = processedStream
-                    .selectExpr("key", "value")
+            query = kafkaSinkMessage
                     .writeStream()
                     .format("kafka")
                     .option("kafka.bootstrap.servers", kafkaBootstrapServers)
@@ -169,140 +172,6 @@ public class SparkWebServicePipeline implements Serializable {
         }
     }
 
-    // Service call processor - maintains one Service instance per executor
-    private static class ServiceCallProcessor implements MapFunction<Row, ServiceCallResult> {
-        private static final long serialVersionUID = 1L;
-        
-        // Lazy-initialized Service instance per executor (JVM)
-        private static transient Service executorService;
-        
-        private Service getService() {
-            if (executorService == null) {
-                synchronized (ServiceCallProcessor.class) {
-                    if (executorService == null) {
-                        executorService = new Service();
-                        logger.info("Created Service instance for executor");
-                    }
-                }
-            }
-            return executorService;
-        }
-        
-        @Override
-        public ServiceCallResult call(Row row) throws Exception {
-            String messageKey = row.getAs("messageKey");
-            java.sql.Timestamp timestamp = row.getAs("timestamp");
-            
-            long startTime = System.currentTimeMillis();
-            ServiceCallResult result = new ServiceCallResult();
-            
-            try {
-                // Make the synchronous service call
-                getService().get();
-                
-                long duration = System.currentTimeMillis() - startTime;
-                serviceCallTime.observe(duration / 1000.0);
-                recordProcessingTime.observe(duration / 1000.0);
-                
-                // Create output event
-                BrokerEvent event = new BrokerEvent(timestamp.getTime());
-                String outputValue = new com.fasterxml.jackson.databind.ObjectMapper()
-                        .writeValueAsString(event);
-                
-                result.messageKey = messageKey;
-                result.timestamp = timestamp;
-                result.outputValue = outputValue;
-                result.callDuration = duration;
-                result.success = true;
-                
-            } catch (Exception e) {
-                logger.error("Service call failed", e);
-                
-                result.messageKey = messageKey;
-                result.timestamp = timestamp;
-                result.outputValue = "";
-                result.callDuration = System.currentTimeMillis() - startTime;
-                result.success = false;
-            }
-            
-            return result;
-        }
-    }
-    
-    // Result of a service call
-    public static class ServiceCallResult implements Serializable {
-        private static final long serialVersionUID = 1L;
-        public String messageKey;
-        public java.sql.Timestamp timestamp;
-        public String outputValue;
-        public long callDuration;
-        public boolean success;
-        
-        // Getters and setters
-        public String getMessageKey() { return messageKey; }
-        public void setMessageKey(String messageKey) { this.messageKey = messageKey; }
-        public java.sql.Timestamp getTimestamp() { return timestamp; }
-        public void setTimestamp(java.sql.Timestamp timestamp) { this.timestamp = timestamp; }
-        public String getOutputValue() { return outputValue; }
-        public void setOutputValue(String outputValue) { this.outputValue = outputValue; }
-        public long getCallDuration() { return callDuration; }
-        public void setCallDuration(long callDuration) { this.callDuration = callDuration; }
-        public boolean isSuccess() { return success; }
-        public void setSuccess(boolean success) { this.success = success; }
-    }
-
-    // Message classes
-    public static class KafkaMessage implements Serializable {
-        private static final long serialVersionUID = 1L;
-        public String key;
-        public String value;
-        public java.sql.Timestamp timestamp;
-        public Long offset;
-        public Integer partition;
-
-        // Getters and setters
-        public String getKey() {
-            return key;
-        }
-
-        public void setKey(String key) {
-            this.key = key;
-        }
-
-        public String getValue() {
-            return value;
-        }
-
-        public void setValue(String value) {
-            this.value = value;
-        }
-
-        public java.sql.Timestamp getTimestamp() {
-            return timestamp;
-        }
-
-        public void setTimestamp(java.sql.Timestamp timestamp) {
-            this.timestamp = timestamp;
-        }
-
-        public Long getOffset() {
-            return offset;
-        }
-
-        public void setOffset(Long offset) {
-            this.offset = offset;
-        }
-
-        public Integer getPartition() {
-            return partition;
-        }
-
-        public void setPartition(Integer partition) {
-            this.partition = partition;
-        }
-    }
-
-
     // StreamingQueryListener for collecting metrics without impacting performance
     private static class MetricsListener extends StreamingQueryListener {
         @Override
@@ -313,34 +182,34 @@ public class SparkWebServicePipeline implements Serializable {
         @Override
         public void onQueryProgress(StreamingQueryListener.QueryProgressEvent event) {
             StreamingQueryProgress progress = event.progress();
-            
+
             // Extract batch metrics from Spark's internal monitoring
             long batchId = progress.batchId();
             long numInputRows = progress.numInputRows();
-            
+
             // Get timing information
             long triggerExecutionTime = 0;
             if (progress.durationMs().containsKey("triggerExecution")) {
                 triggerExecutionTime = progress.durationMs().get("triggerExecution");
             }
-            
+
             // Update Prometheus metrics
             if (numInputRows > 0) {
                 batchSizeMetric.observe(numInputRows);
                 numberOfBatchesMetric.inc();
-                
+
                 if (triggerExecutionTime > 0) {
                     batchProcessingTime.observe(triggerExecutionTime / 1000.0);
                 }
-                
+
                 logger.debug("Processed batch {} with {} records in {} ms",
                         batchId, numInputRows, triggerExecutionTime);
             }
-            
+
             // Log additional performance metrics available from Spark
             if (progress.inputRowsPerSecond() > 0) {
                 logger.debug("Processing rate: {} rows/sec, Batch duration: {} ms",
-                        progress.processedRowsPerSecond(), 
+                        progress.processedRowsPerSecond(),
                         progress.batchDuration());
             }
         }
@@ -356,5 +225,32 @@ public class SparkWebServicePipeline implements Serializable {
 
     public static void main(String[] args) {
         new SparkWebServicePipeline().run();
+    }
+
+    public class ExecutorContext {
+        private static transient ConfigService client = null;
+        private static transient Service executorService = null;
+
+        public static ConfigService getClient() {
+            if (client == null) {
+                synchronized (ExecutorContext.class) {
+                    if (client == null) {
+                        client = new ConfigService(); // expensive init here
+                    }
+                }
+            }
+            return client;
+        }
+
+        public static Service getExecutorService() {
+            if (executorService == null) {
+                synchronized (ExecutorContext.class) {
+                    if (executorService == null) {
+                        executorService = new Service(); // expensive init here
+                    }
+                }
+            }
+            return executorService;
+        }
     }
 }

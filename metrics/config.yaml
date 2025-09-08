@@ -1,6 +1,6 @@
 concurrentEventProcessing: 450
 batchSize: 15000
-loadGeneratorRate: 100.0
+loadGeneratorRate: 10000.0
 endpointLatency:
   p25: 25ms
   p50: 25ms

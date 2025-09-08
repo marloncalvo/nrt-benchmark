@@ -46,7 +46,7 @@ services:
   java-pipeline:
     build:
       context: .
-      dockerfile: containers/flink-pipeline.Dockerfile
+      dockerfile: containers/spark-pipeline.Dockerfile
     image: java-pipeline
     ports:
       - "8082:8082"
@@ -57,9 +57,8 @@ services:
       - INPUT_TOPIC=input-topic
       - OUTPUT_TOPIC=output-topic
       - ENDPOINT_BASE_PATH=http://go-server:5050
-      # Keep parallelism and task slots aligned to avoid under-resourced subtasks
-      - FLINK_PARALLELISM=32
-      - FLINK_TASK_SLOTS=32
+      - |
+        FLINK_PROPERTIES=taskmanager.numberOfTaskSlots:10
     depends_on:
       - load-generator
       - go-server
