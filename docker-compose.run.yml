@@ -46,15 +46,20 @@ services:
   java-pipeline:
     build:
       context: .
-      dockerfile: containers/webservice-pipeline.Dockerfile
+      dockerfile: containers/flink-pipeline.Dockerfile
     image: java-pipeline
     ports:
       - "8082:8082"
+      - "4040:4040"  # Expose Spark UI default 4040 as 4040 on host
+      - "8083:8081"  # Expose Flink Web UI default 8081 as 8083 on host
     environment:
       - KAFKA_ENDPOINT=kafka:9092
       - INPUT_TOPIC=input-topic
       - OUTPUT_TOPIC=output-topic
       - ENDPOINT_BASE_PATH=http://go-server:5050
+      # Keep parallelism and task slots aligned to avoid under-resourced subtasks
+      - FLINK_PARALLELISM=32
+      - FLINK_TASK_SLOTS=32
     depends_on:
       - load-generator
       - go-server

@@ -4,6 +4,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
@@ -35,8 +36,22 @@ public class Service {
             .build();
     }
 
-    public void Get() {
+    public void get() {
         this.getJava();
+    }
+
+    public CompletableFuture<?> getAsync() {
+        return this.getJavaAsync();
+    }
+
+    private CompletableFuture<HttpResponse<Void>> getJavaAsync() {
+        return this.javaHttpClient.sendAsync(
+            HttpRequest.newBuilder()
+                .uri(URI.create(endpointBasePath + "/"))
+                .timeout(java.time.Duration.ofMillis(200))
+                .build(),
+            HttpResponse.BodyHandlers.discarding()
+        );
     }
 
     private void getJava() {

@@ -55,7 +55,7 @@ public abstract class BasePipeline {
 
     protected void serviceEndpointCall() {
         long startTime = System.currentTimeMillis();
-        this.service.Get();
+        this.service.get();
         long duration = System.currentTimeMillis() - startTime;
         serviceCallTime.observe(duration / 1000.0);
     }
